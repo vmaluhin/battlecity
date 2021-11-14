@@ -1,7 +1,7 @@
-// BattleCity game by Vyacheslav Maluhin, 2021
+// BattleCity game for DasBox
+// By Vyacheslav Maluhin, 2021
+// https://github.com/vmaluhin/battlecity
 // License: The Unlicense
-// DasBox Portable is required to run this game (https://github.com/imp5imp5/dasbox/releases)
-// This scripting language is daScript (https://dascript.org/)
 
 require daslib/media
 require daslib/decs_boost
@@ -16,7 +16,7 @@ struct CmpVisual
 
 [decs_template]
 struct CmpCollision
-    damage: int
+    canPenetrate: bool
     team: int
 
 [decs_template]
@@ -32,6 +32,11 @@ struct CmpFiring
 [decs_template]
 struct CmpHealth
     hp: int
+
+[decs_template]
+struct CmpDamage
+    damage: int
+    emitterEid: EntityId
 
 [decs_template]
 struct CmpLifetime
@@ -96,6 +101,7 @@ let
     COOLDOWN_FIRE_SEC = 1.0
     AI_MAX_DELAY_FIRE_SEC = 6.0
     AI_MAX_DELAY_DRIVE_SEC = 3.0
+    FRIENDLY_FIRE_ALLOWED = false
 
     MAP_SIZE = int2(length(MAP[0]), length(MAP))
     FIELD_SIZE = float2(CELL_SIZE_PX * float(MAP_SIZE.x), CELL_SIZE_PX * float(MAP_SIZE.y))
@@ -168,18 +174,29 @@ def act(dt: float)
     if get_key(VK_ESCAPE)
         schedule_quit_game()
 
+    if isMissionRestartRequested
+        isMissionRestartRequested = false
+        for k in keys(arrowKeysTime)
+            arrowKeysTime[k] = 0.0
+        restart_mission(false)
+        return
+
     decs_stage("input")
     commit()
 
-    decs_stage("update")
-    for delEid in deleteEntities
-        delete_entity(delEid)
-    deleteEntities |> clear()
+    decs_stage("update_lifetime")
+    delete_entities_delayed()
     commit()
 
-    if isMissionRestartRequested
-        isMissionRestartRequested = false
-        restart_mission(false)
+    decs_stage("update_positions")
+    commit()
+
+    decs_stage("update_interaction")
+    delete_entities_delayed()
+    commit()
+
+    decs_stage("update_mission")
+    commit()
 
 // this function will be called every frame after 'act',
 // you can draw anything in this function
@@ -245,13 +262,15 @@ def make_tank(pos: float2; dir: float2; is_hero: bool)
                 timeNextDrive = random_float(randomSeed) * AI_MAX_DELAY_DRIVE_SEC
             ]])
 
-def make_bullet(pos: float2; dir: float2; team: int)
+def make_bullet(pos: float2; dir: float2; emitterEid: EntityId; team: int)
     let objTypeIdx = 6
     create_entity <| @ ( eid, cmp )
         cmp |> set("eid", eid)
         apply_decs_template(cmp, [[ CmpVisual pos = pos, dir = dir, objTypeIdx = objTypeIdx ]])
-        apply_decs_template(cmp, [[ CmpCollision team = team, damage = 2 ]])
+        apply_decs_template(cmp, [[ CmpCollision team = team, canPenetrate = true ]])
         apply_decs_template(cmp, [[ CmpMobility dir = dir, speed = SPEED_BULLET ]])
+        apply_decs_template(cmp, [[ CmpHealth hp = 2 ]])
+        apply_decs_template(cmp, [[ CmpDamage damage = 2, emitterEid = emitterEid ]])
 
 def make_explosion(pos: float2; objTypeIdx: int)
     create_entity <| @ ( eid, cmp )
@@ -313,14 +332,14 @@ def sys_update_user_control_movement(var v: CmpVisual; var m: CmpMobility; var u
     v.dir = m.dir
 
 [decs(stage = input)]
-def sys_update_user_control_firing(var v: CmpVisual; var f: CmpFiring; var u: CmpControlUser)
+def sys_update_user_control_firing(var v: CmpVisual; var f: CmpFiring; var u: CmpControlUser; eid: EntityId)
     if !u.canControl
         return
     if f.cooldown > 0.0
         f.cooldown = max(0.0, f.cooldown - get_delta_time())
     if get_key(VK_SPACE) && f.cooldown == 0.0
         let t = objTypes[v.objTypeIdx]
-        make_bullet(get_bullet_spawn_pos(v.pos, v.dir, t.size), v.dir, f.team)
+        make_bullet(get_bullet_spawn_pos(v.pos, v.dir, t.size), v.dir, eid, f.team)
         f.cooldown = COOLDOWN_FIRE_SEC
 
 [decs(stage = input)]
@@ -336,7 +355,7 @@ def sys_update_bot_ai_movement(var v: CmpVisual; var m: CmpMobility; var b: CmpC
         b.timeNextDrive = random_float(randomSeed) * AI_MAX_DELAY_DRIVE_SEC
 
 [decs(stage = input)]
-def sys_update_bot_ai_firing(var v: CmpVisual; var f: CmpFiring; var b: CmpControlBot)
+def sys_update_bot_ai_firing(var v: CmpVisual; var f: CmpFiring; var b: CmpControlBot; eid: EntityId)
     let dt = get_delta_time()
     if f.cooldown > 0.0
         f.cooldown = max(0.0, f.cooldown - dt)
@@ -344,49 +363,72 @@ def sys_update_bot_ai_firing(var v: CmpVisual; var f: CmpFiring; var b: CmpContr
         b.timeNextFire = max(0.0, b.timeNextFire - dt)
     if b.timeNextFire == 0.0 && f.cooldown == 0.0
         let t = objTypes[v.objTypeIdx]
-        make_bullet(get_bullet_spawn_pos(v.pos, v.dir, t.size), v.dir, f.team)
+        make_bullet(get_bullet_spawn_pos(v.pos, v.dir, t.size), v.dir, eid, f.team)
         f.cooldown = COOLDOWN_FIRE_SEC
         b.timeNextFire = random_float(randomSeed) * AI_MAX_DELAY_FIRE_SEC
 
-[decs(stage = update)]
+[decs(stage = update_lifetime)]
 def sys_update_obj_lifetime(var l: CmpLifetime; eid: EntityId)
     l.ttl -= get_delta_time()
     if l.ttl <= 0.0
         deleteEntities |> push(eid)
 
-[decs(stage = update)]
-def sys_update_obj_movement_and_interaction(var c: CmpCollision; var v: CmpVisual; var m: CmpMobility; eid: EntityId)
-    if m.speed != 0.0
-        let t = objTypes[v.objTypeIdx]
-        let size = get_rotated_size(t.size, m.dir)
-        let expectedPos = v.pos + (v.dir * m.speed * get_delta_time())
-        v.pos = clamp(expectedPos, size * 0.5, FIELD_SIZE - size * 0.5)
-        let hasMapEdgeCollosion = expectedPos != v.pos
-        if hasMapEdgeCollosion && c.damage > 0
-            deleteEntities |> push(eid)
+[decs(stage = update_positions)]
+def sys_update_obj_positions(var c: CmpCollision; var v: CmpVisual; var m: CmpMobility; eid: EntityId)
+    if m.speed == 0.0
+        return
+    let expectedPos = v.pos + (v.dir * m.speed * get_delta_time())
+    if c.canPenetrate
+        v.pos = expectedPos
+        return
+    let t = objTypes[v.objTypeIdx]
+    let size = get_rotated_size(t.size, m.dir)
+    v.pos = clamp(expectedPos, size * 0.5, FIELD_SIZE - size * 0.5)
+    let box1 = to_box(v.pos, t.size, v.dir)
+    let selfEid = eid
+    query <| $ (cc: CmpCollision; cv: CmpVisual; eid: EntityId)
+        if cc.canPenetrate
             return
-        let selfEid = eid
-        let box1 = to_box(v.pos, t.size, v.dir)
-        query <| $ (cc: CmpCollision; cv: CmpVisual; eid: EntityId)
-            let ct = objTypes[cv.objTypeIdx]
-            let box2 = to_box(cv.pos, ct.size, cv.dir)
-            let needCollisionCheck = selfEid != eid && cc.damage == 0 && (c.damage == 0 || c.team != cc.team)
-            let hasCollision = needCollisionCheck && has_collision_on_the_way(v.dir, box1, box2)
-            if hasCollision && c.damage == 0
-                v.pos = limit_pos_by_collision(v.dir, box1, box2)
-            if hasCollision && c.damage > 0 && cc.damage == 0
-                query(eid) <| $ (var ch: CmpHealth)
-                    let hit = min(ch.hp, c.damage)
-                    c.damage -= hit
-                    ch.hp -= hit
-                    if ch.hp == 0
-                        if ct.explosionObjIdx != -1
-                            make_explosion(cv.pos, ct.explosionObjIdx)
-                        deleteEntities |> push(eid)
-                if c.damage == 0
-                    deleteEntities |> push(selfEid)
+        let ct = objTypes[cv.objTypeIdx]
+        let box2 = to_box(cv.pos, ct.size, cv.dir)
+        let hasCollision = eid != selfEid && has_collision_on_the_way(v.dir, box1, box2)
+        if hasCollision
+            v.pos = limit_pos_by_collision(v.dir, box1, box2)
 
-[decs(stage = update)]
+[decs(stage = update_interaction)]
+def sys_update_bullet_damage(var c: CmpCollision; var d: CmpDamage; var v: CmpVisual; var m: CmpMobility; eid: EntityId)
+    let t = objTypes[v.objTypeIdx]
+    let size = get_rotated_size(t.size, m.dir)
+    let clampedPos = clamp(v.pos, size * 0.5, FIELD_SIZE - size * 0.5)
+    if v.pos != clampedPos
+        make_explosion(clampedPos, 7)
+        deleteEntities |> push(eid)
+        return
+    let box1 = to_box(v.pos, t.size, v.dir)
+    let selfEid = eid
+    var hasExplosions = false
+    query <| $ (cc: CmpCollision; cv: CmpVisual; eid: EntityId)
+        let ct = objTypes[cv.objTypeIdx]
+        let box2 = to_box(cv.pos, ct.size, cv.dir)
+        var needCollisionCheck = eid != selfEid && eid != d.emitterEid && (FRIENDLY_FIRE_ALLOWED || c.team != cc.team)
+        let hasCollision = needCollisionCheck && has_collision_on_the_way(v.dir, box1, box2)
+        if (!hasCollision)
+            return
+        query(eid) <| $ (var ch: CmpHealth)
+            let hit = min(ch.hp, d.damage)
+            d.damage -= hit
+            ch.hp -= hit
+            if ch.hp == 0
+                if ct.explosionObjIdx != -1
+                    make_explosion(cv.pos, ct.explosionObjIdx)
+                    hasExplosions = true
+                deleteEntities |> push(eid)
+    if d.damage == 0
+        if !hasExplosions
+            make_explosion(v.pos, 7)
+        deleteEntities |> push(selfEid)
+
+[decs(stage = update_mission)]
 def sys_update_mission_state(var r: CmpMissionState)
     if r.missionResult != 0
         return
@@ -446,6 +488,11 @@ def sys_draw_ui(var r: CmpMissionState)
 ////////////////////////////////////////////////////////////////////////////////
 // Utils
 ////////////////////////////////////////////////////////////////////////////////
+
+def delete_entities_delayed
+    for eid in deleteEntities
+        delete_entity(eid)
+    deleteEntities |> clear()
 
 def get_rotated_size(size: float2; dir: float2) : float2
     return dir == DIR_UP || dir == DIR_DOWN ? float2(size.y, size.x) : size
