@@ -223,7 +223,7 @@ def restart_mission(is_initial: bool)
             if cell == '1' || cell == '2'
                 let isHero = cell == '1'
                 make_tank(pos, isHero ? DIR_UP : DIR_DOWN, isHero)
-            if cell == 'B' || cell == 'M' || cell == 'T'
+            elif cell == 'B' || cell == 'M' || cell == 'T'
                 let objTypeIdx = cell == 'B' ? 2 : cell == 'M' ? 3 : 4
                 let needCollision = cell != 'T'
                 let isForeground = cell == 'T'
@@ -233,7 +233,7 @@ def restart_mission(is_initial: bool)
                         let shiftPosX = CELL_SIZE_PX * 0.5 * float(wx) - CELL_SIZE_PX * 0.25
                         let shiftPosY = CELL_SIZE_PX * 0.5 * float(wy) - CELL_SIZE_PX * 0.25
                         make_wall(pos + float2(shiftPosX, shiftPosY), objTypeIdx, hp, needCollision, isForeground)
-            if cell == 'F'
+            elif cell == 'F'
                 make_flag(pos)
     commit()
     var keepAliveTotal = 0
@@ -387,12 +387,11 @@ def sys_update_obj_positions(var c: CmpCollision; var v: CmpVisual; var m: CmpMo
     let box1 = to_box(v.pos, t.size, v.dir)
     let selfEid = eid
     query <| $ (cc: CmpCollision; cv: CmpVisual; eid: EntityId)
-        if cc.canPenetrate
+        if eid == selfEid || cc.canPenetrate
             return
         let ct = objTypes[cv.objTypeIdx]
         let box2 = to_box(cv.pos, ct.size, cv.dir)
-        let hasCollision = eid != selfEid && has_collision_on_the_way(v.dir, box1, box2)
-        if hasCollision
+        if has_collision_on_the_way(v.dir, box1, box2)
             v.pos = limit_pos_by_collision(v.dir, box1, box2)
 
 [decs(stage = update_interaction)]
@@ -408,11 +407,11 @@ def sys_update_bullet_damage(var c: CmpCollision; var d: CmpDamage; var v: CmpVi
     let selfEid = eid
     var hasExplosions = false
     query <| $ (cc: CmpCollision; cv: CmpVisual; eid: EntityId)
+        if eid == selfEid || eid == d.emitterEid || (!FRIENDLY_FIRE_ALLOWED && c.team == cc.team)
+            return
         let ct = objTypes[cv.objTypeIdx]
         let box2 = to_box(cv.pos, ct.size, cv.dir)
-        var needCollisionCheck = eid != selfEid && eid != d.emitterEid && (FRIENDLY_FIRE_ALLOWED || c.team != cc.team)
-        let hasCollision = needCollisionCheck && has_collision_on_the_way(v.dir, box1, box2)
-        if (!hasCollision)
+        if (!has_collision_on_the_way(v.dir, box1, box2))
             return
         query(eid) <| $ (var ch: CmpHealth)
             let hit = min(ch.hp, d.damage)
@@ -514,11 +513,11 @@ def limit_pos_by_collision(dir: float2; box: float4; obstacleBox: float4): float
     var pos = float2(box.x + halfSize.x, box.y + halfSize.y)
     if dir.x < 0.0 && box.x > obstacleBox.x
         pos.x = max(box.x, obstacleBox.z) + halfSize.x
-    if dir.x > 0.0 && box.z < obstacleBox.z
+    elif dir.x > 0.0 && box.z < obstacleBox.z
         pos.x = min(box.z, obstacleBox.x) - halfSize.x
-    if dir.y < 0.0 && box.y > obstacleBox.y
+    elif dir.y < 0.0 && box.y > obstacleBox.y
         pos.y = max(box.y, obstacleBox.w) + halfSize.y
-    if dir.y > 0.0 && box.w < obstacleBox.w
+    elif dir.y > 0.0 && box.w < obstacleBox.w
         pos.y = min(box.w, obstacleBox.y) - halfSize.y
     return pos
 
